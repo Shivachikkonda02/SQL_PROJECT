@@ -1,0 +1,142 @@
+USE BANK_LOAN;
+CREATE TABLE gold_fact_sales (
+    order_number VARCHAR(20),
+    product_key INT,
+    customer_key INT,
+    order_date DATE,
+    shipping_date DATE,
+    due_date DATE,
+    sales_amount INT,
+    quantity INT,
+    price INT
+);
+
+-- Analyze sales performance over time
+SELECT YEAR(ORDER_DATE) AS ORDER_YEAR,SUM(SALES_AMOUNT) AS Total_Sales,
+COUNT(DISTINCT CUSTOMER_KEY) AS Total_Customers
+FROM GOLD_FACT_SALES
+where order_date IS NOT NULL
+GROUP BY YEAR(ORDER_DATE)
+ORDER BY YEAR(ORDER_DATE);
+
+SELECT MONTH(ORDER_DATE) AS ORDER_MONTH,SUM(SALES_AMOUNT) AS Total_Sales,
+COUNT(DISTINCT CUSTOMER_KEY) AS Total_Customers
+FROM GOLD_FACT_SALES
+where order_date IS NOT NULL
+GROUP BY MONTH(ORDER_DATE)
+ORDER BY MONTH(ORDER_DATE);
+
+-- Calculate the total sales per month
+-- and the running total of sales over time
+SELECT 
+    order_month,
+    total_sales,
+    SUM(total_sales) OVER (
+        ORDER BY order_month
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_total_sales
+FROM (
+    SELECT 
+        DATE_FORMAT(order_date, '%Y-%m-01') AS order_month,
+        SUM(sales_amount) AS total_sales
+    FROM gold_fact_sales
+    WHERE order_date IS NOT NULL
+    GROUP BY DATE_FORMAT(order_date, '%Y-%m-01')
+) t;
+
+
+/*Analyze the yearly performace of products by comparing their sales
+to both the average sales performance of the product and the previous years sales*/
+WITH YEARLY_PRODUCT_SALES AS (
+SELECT
+YEAR(F.ORDER_DATE) AS ORDER_YEAR,
+P.PRODUCT_NAME,
+SUM(F.SALES_AMOUNT) AS CURRENT_SALES
+FROM GOLD_FACT_SALES F
+LEFT JOIN GOLD_DIM_PRODUCTS P 
+ON F.PRODUCT_KEY = P.PRODUCT_KEY
+WHERE F.ORDER_DATE IS NOT NULL
+GROUP BY YEAR(F.ORDER_DATE),
+P.PRODUCT_NAME
+)
+SELECT 
+    ORDER_YEAR,
+    PRODUCT_NAME,
+    CURRENT_SALES,
+    AVG(CURRENT_SALES) OVER (PARTITION BY PRODUCT_NAME) AS AVG_SALES,
+    CURRENT_SALES - AVG(CURRENT_SALES) OVER (PARTITION BY PRODUCT_NAME) AS DIFF_AVG,
+    CASE 
+        WHEN CURRENT_SALES - AVG(CURRENT_SALES) OVER (PARTITION BY PRODUCT_NAME) > 0 THEN 'ABOVE AVG'
+        WHEN CURRENT_SALES - AVG(CURRENT_SALES) OVER (PARTITION BY PRODUCT_NAME) < 0 THEN 'BELOW AVG'
+        ELSE 'AVG'
+    END AS AVG_CHANGE,
+    LAG(CURRENT_SALES) OVER (PARTITION BY PRODUCT_NAME ORDER BY ORDER_YEAR) AS PY_SALES
+FROM YEARLY_PRODUCT_SALES;
+
+-- Which categories contribute the most to overall sales
+WITH CATEGORY_SALES AS (
+SELECT 
+P.CATEGORY,
+SUM(F.SALES_AMOUNT) AS TOTAL_SALES
+FROM GOLD_FACT_SALES F
+LEFT JOIN GOLD_DIM_PRODUCTS P
+ON P.PRODUCT_KEY = F.PRODUCT_KEY
+GROUP BY P.CATEGORY)
+
+SELECT 
+CATEGORY,
+TOTAL_SALES,
+SUM(TOTAL_SALES) OVER() OVERALL_SALES,
+CONCAT((TOTAL_SALES / SUM(TOTAL_SALES) OVER())*100, '%') AS PERCENTAGE_OF_TOTAL
+FROM CATEGORY_SALES;
+
+/* Segment products into cost ranges and count how many products all into each segment */
+
+SELECT 
+PRODUCT_KEY,
+PRODUCT_NAME,
+COST,
+CASE
+    WHEN COST < 100 THEN 'BELOW 100'
+    WHEN COST BETWEEN 100 AND 500 THEN '100-500'
+    WHEN COST BETWEEN 500 AND 1000 THEN '500-1000'
+    ELSE 'ABOVE 1000'
+    END COST_RANGE
+FROM GOLD_DIM_PRODUCTS;
+
+/* Group customers into three segments based on their spending behaviour:
+ - VIP: customer with atleast 12 months of history and spending more than 5000. 
+ - Regualr: customers atleast with 12 months of history but spending 5,000 or less.
+ - New: Customers with a lifespan less than 12 months.
+ */
+WITH CUSTOMER_SPENDING AS ( 
+SELECT 
+    F.CUSTOMER_KEY,
+    SUM(F.SALES_AMOUNT) AS TOTAL_SPENDING,
+    MIN(F.ORDER_DATE) AS FIRST_ORDER,
+    MAX(F.ORDER_DATE) AS LAST_ORDER,
+    TIMESTAMPDIFF(MONTH, MIN(F.ORDER_DATE), MAX(F.ORDER_DATE)) AS LIFESPAN
+FROM GOLD_FACT_SALES F
+GROUP BY F.CUSTOMER_KEY
+)
+
+SELECT
+CUSTOMER_SEGMENT,
+COUNT(CUSTOMER_KEY) AS TOTAL_CUSTOMERS
+FROM(
+SELECT 
+CUSTOMER_KEY,
+CASE
+    WHEN LIFESPAN >=12 AND TOTAL_SPENDING > 5000 THEN 'VIP'
+    WHEN LIFESPAN >=12 AND TOTAL_SPENDING <=5000 THEN 'Regular'
+    ELSE 'NEW'
+    END CUSTOMER_SEGMENT
+FROM CUSTOMER_SPENDING) t
+GROUP BY CUSTOMER_SEGMENT
+ORDER BY TOTAL_CUSTOMERS DESC;
+
+
+
+
+SELECT * FROM GOLD_DIM_PRODUCTS;
+SELECT * FROM GOLD_FACT_SALES;
